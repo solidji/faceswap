@@ -5,7 +5,7 @@ import logging
 import re
 import os
 import sys
-from threading import Event
+from threading import Event, Lock
 from time import sleep
 
 from cv2 import imwrite  # pylint:disable=no-name-in-module
@@ -658,7 +658,10 @@ class Predict():
                          item["filename"], len(item["detected_faces"]),
                          item["swapped_faces"].shape[0])
             pointer += num_faces
+        lock = Lock()
+        lock.acquire()
         self.out_queue.put(batch)
+        lock.release()
         logger.trace("Queued out batch. Batchsize: %s", len(batch))
 
 

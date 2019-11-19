@@ -5,7 +5,7 @@ import logging
 import re
 import os
 import sys
-from threading import Event
+from threading import Event, Lock
 from time import sleep
 import time
 import cv2
@@ -129,7 +129,6 @@ class Webcam():
 
         load_queue = queue_manager.get_queue("convert_in")
         detectIn_queue = queue_manager.get_queue("extract_detect_in")
-        detectOut_queue = queue_manager.get_queue("extract_align_in")
         alignIn_queue = queue_manager.get_queue("extract_align_in")
         alignOut_queue = queue_manager.get_queue("extract_align_out")
         self.patch_threads = MultiThread(self.converter.process, patch_queue, save_queue,
@@ -137,22 +136,9 @@ class Webcam():
 
         self.patch_threads.start()
 
-        # cap = cv2.VideoCapture(0)
-        # while True:
-        #     startTime = time.time()
-        #     cap.grab()
-        #     _, frame = cap.retrieve()
-        #     cv2.imshow("test", frame)
-        #     k = cv2.waitKey(100) & 0xFF
-        #     timeElapsed = time.time() - startTime
-        #     print(timeElapsed)
-        #     if k == ord('q'):
-        #         cv2.destroyAllWindows()
-        #         break
-
-        #self.disk_io._windowManagerOut.createWindow()
         cv2.namedWindow("outframe")
         while True:
+            # lock.acquire()
             # self.check_thread_error()
             # if self.disk_io.completion_event.is_set():
             #     logger.debug("DiskIO completion event set. Joining Pool")
@@ -164,21 +150,19 @@ class Webcam():
             #     break
             # sleep(1)
 
-            #if self.disk_io._windowManagerOut.isWindowCreated:
             startTime = time.time()
             try:
                 filename, outframe = save_queue.get(True, 1)
             except QueueEmpty:
                 continue
 
-            print("file: %s, alignOut: %d, detectIn: %d, detectOut: %d, alignIn: %d, load: %d, patch: %d, save: %d" %
-                  (filename, alignOut_queue.qsize(), detectIn_queue.qsize(), detectOut_queue.qsize(), alignIn_queue.qsize(),
+            print("file: %s, detectIn: %d, alignIn: %d, alignOut: %d, load: %d, patch: %d, save: %d" %
+                  (filename, detectIn_queue.qsize(),
+                   alignIn_queue.qsize(), alignOut_queue.qsize(),
                    load_queue.qsize(), patch_queue.qsize(), save_queue.qsize()))
 
-            # self.disk_io._windowManagerOut.show(frame)
-            # self.disk_io._windowManagerOut.processEvents()
             cv2.imshow("outframe", outframe)
-            keycode = cv2.waitKey(30) & 0xFF
+            keycode = cv2.waitKey(1) & 0xFF
             timeElapsed = time.time() - startTime
             print(timeElapsed)
             if keycode == ord('q'):
@@ -363,14 +347,14 @@ class CamIO(DiskIO):
         super().__init__(alignments, images, arguments)
 
     def onKeypress(self, keycode):
-        if keycode == 32: # space
+        if keycode == 32:  # space
             self._captureManager.writeImage('screenshot.png')
-        elif keycode == 9: # tab
+        elif keycode == 9:  # tab
             if not self._captureManager.isWritingVideo:
                 self._captureManager.startWritingVideo('screencast.avi')
             else:
                 self._captureManager.stopWrtingVideo()
-        elif keycode == 27: # escape
+        elif keycode == 27:  # escape
             self._windowManager.destroyWindow()
 
     # def run(self):
@@ -387,9 +371,9 @@ class CamIO(DiskIO):
         """读取摄像头帧，存入extractor_detect_in队列，
         之前extractor.launch()启动的detect线程开始检测并保存faces到extract_detect的输出队列，
         然后循环读取输出队列，存入load即convert_in队列，"""
-        #self._windowManager.createWindow()
         idx = 0
-        while True: #self._windowManager.isWindowCreated:
+        lock = Lock()
+        while True:  # self._windowManager.isWindowCreated:
             idx += 1
             self._captureManager.enterFrame()
             frame = self._captureManager.frame
@@ -397,14 +381,15 @@ class CamIO(DiskIO):
                 detected_faces = self.get_detected_faces(idx, frame)
                 item = dict(filename=idx, image=frame, detected_faces=detected_faces)
                 self.pre_process.do_actions(item)
+                lock.acquire()
                 self.load_queue.put(item)
-
+                lock.release()
             self._captureManager.exitFrame()
-            keycode = cv2.waitKey(1)
-            #self._windowManager.processEvents()
 
     def save(self, completion_event):
-        pass
+        print("thread_save run")
+        sleep(0.001)
+        return
         # self._windowManagerOut.createWindow()
         # while self._windowManagerOut.isWindowCreated:
         #     item = self.save_queue.get()
@@ -412,19 +397,71 @@ class CamIO(DiskIO):
         #     self._windowManagerOut.show(frame)
         #     self._windowManagerOut.processEvents()
 
-if __name__ == "__main__":
-    # CamIO(None, None, None).run()
+
+def grabFun(q_in):
+    lock = Lock()
+
+    grab_queue = queue_manager.get_queue("grab")
     cap = cv2.VideoCapture(0)
+    idx = 0
     while True:
-        startTime = time.time()
+        lock.acquire()
+        idx += 1
         cap.grab()
         _, frame = cap.retrieve()
-        cv2.imshow("", frame)
+        in_frame = frame.copy()
+        q_in.put(in_frame)
+        sleep(0.01)
+        lock.release()
+
+
+def predFun(q_in, q_out):
+    grab_queue = queue_manager.get_queue("grab")
+    display_queue = queue_manager.get_queue("display")
+    lock =Lock()
+    while True:
+        lock.acquire()
+        frame = q_in.get()
+        out_frame = frame.copy()
+        q_out.put(out_frame)
+        sleep(0.01)
+        lock.release()
+
+
+if __name__ == "__main__":
+    grab_queue = queue_manager.get_queue("grab")
+    display_queue = queue_manager.get_queue("display")
+
+    grab_threads = MultiThread(grabFun, grab_queue,
+                               thread_count=1, name="grab")
+
+    grab_threads.start()
+
+    patch_threads = MultiThread(predFun, grab_queue, display_queue,
+                                thread_count=1, name="display")
+
+    patch_threads.start()
+    lock = Lock()
+    while True:
+        lock.acquire()
+        startTime = time.time()
+        try:
+            frame = display_queue.get(True, 1)
+        except QueueEmpty:
+            sleep(0.01)
+            lock.release()
+            continue
+        cv2.imshow("display", frame)
         timeElapsed = time.time() - startTime
-        print(timeElapsed)
-        k = cv2.waitKey(10)
+        print(timeElapsed, grab_queue.qsize(), display_queue.qsize())
+        k = cv2.waitKey(20)
         if k == ord('q'):
             cv2.destroyAllWindows()
+            lock.release()
             break
+        sleep(0.01)
+        lock.release()
 
 
+    grab_threads.completed()
+    patch_threads.completed()
